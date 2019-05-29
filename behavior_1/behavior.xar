@@ -16,7 +16,7 @@
                 <BehaviorKeyframe name="keyframe1" index="1">
                     <Diagram>
                         <Box name="GA" id="2" localization="8" tooltip="This box contains a python script that can be utilized to speak with Google Assistant" x="432" y="120">
-                            <bitmap>../../../../../Others/tirocinio/node-assistant/module-chore/google-assistant.png</bitmap>
+                            <bitmap>media/images/box/box-python-script.png</bitmap>
                             <script language="4">
                                 <content>
                                     <![CDATA[import wave
@@ -26,14 +26,13 @@ import re
 import json
 import sys
 import threading
+import errno
 
 from subprocess import Popen, PIPE
 from threading import Thread
 from Queue import Queue, Empty
 
 # TCP client
-TCP_IP = '172.20.10.4'
-TCP_PORT = 32768
 BUFFER_SIZE = 512
 
 # GA answers
@@ -48,48 +47,18 @@ command = ['arecord',
 
 ON_POSIX = 'posix' in sys.builtin_module_names
 
-def enqueue_output(out, queue):
-    t = threading.currentThread()
-
-    for line in iter(out.readline, b''):
-        if getattr(t, "stop_t", False):
-            # Stop thread
-            break
-        queue.put(line)
-    out.close()
-
-def connect_ga():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect((TCP_IP, TCP_PORT))
-    return s
-
-def start_recording():
-    p = Popen(command, stdout=PIPE, bufsize=1, close_fds=ON_POSIX)
-    q = Queue()
-    t = Thread(target=enqueue_output, args=(p.stdout, q))
-    t.daemon = True
-    t.start()
-
-    return q, t
-
-def remove_emoji(text):
-    emoji_pattern = re.compile("["
-        u"\U0001F600-\U0001F64F"  # emoticons
-        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
-        u"\U0001F680-\U0001F6FF"  # transport & map symbols
-        u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
-                           "]+", flags=re.UNICODE)
-    return emoji_pattern.sub(r'', text)
-
 class MyClass(GeneratedClass):
     def __init__(self):
         GeneratedClass.__init__(self)
         self.tts = ALProxy('ALTextToSpeech')
-        self.soundPeak = False
 
     def onLoad(self):
         #put initialization code here
-        pass
+        self.soundPeak = False
+        self.eu = ""
+        self.isEOU = False
+        self.ip = self.getParameter('IP')
+        self.port = self.getParameter('Port')
 
     def onUnload(self):
         #put clean-up code here
@@ -104,11 +73,12 @@ class MyClass(GeneratedClass):
     def start_zora(self):
         self.isEOU = False
         self.eu = ""
+        self.soundPeak = False
 
-        self.q, self.t = start_recording()
+        self.q, self.t = self.start_recording()
         self.logger.info("Recording...")
 
-        self.s = connect_ga()
+        self.s = self.connect_ga()
         self.logger.info("Connected to GA")
 
         self.onListening()
@@ -133,8 +103,19 @@ class MyClass(GeneratedClass):
                 else:
                     #We have data, send it
                     #audioList.append(data)
-                    self.s.send(data)
-                    self.eu += self.s.recv(BUFFER_SIZE)
+                    try:
+                        self.s.send(data)
+
+                        try:
+                            self.eu += self.s.recv(BUFFER_SIZE)
+                        except socket.error, e:
+                            err = e.args[0]
+
+                            if err != errno.EAGAIN and err != errno.EWOULDBLOCK:
+                                self.logger.info(e)
+                                break;
+                    except:
+                        break;
 
                 if (self.eu is None):
                     self.logger.info("Wrong answer from server")
@@ -145,7 +126,14 @@ class MyClass(GeneratedClass):
                     self.logger.info("END_OF_UTTERANCE")
 
                     while True:
-                        self.eu += self.s.recv(BUFFER_SIZE)
+                        try:
+                            self.eu += self.s.recv(BUFFER_SIZE)
+                        except socket.error, e:
+                            err = e.args[0]
+
+                            if err != errno.EAGAIN and err != errno.EWOULDBLOCK:
+                                print e
+                                break;
 
                         #No more data from server
                         if("STOP_JSON" in self.eu):
@@ -176,11 +164,11 @@ class MyClass(GeneratedClass):
                 if data:
                     response = json.loads(data.group(1))
 
-                    del self.eu
+                    self.eu = ""
 
                     if "text" in response:
                         #We have a text answer from GA
-                        speach = remove_emoji(response["text"])
+                        speach = self.remove_emoji(response["text"])
                         speach = speach.encode('utf-8')
                         speach = re.sub(r'\.\n.*\n*\( +.+\)\.*', '', speach) #remove link from supplemental display text
                         speach = re.sub(r'-{3}', '', speach) #remove ---
@@ -191,27 +179,47 @@ class MyClass(GeneratedClass):
                         microphone_mode = str(response["microphone_mode"]) #CLOSE_MICROPHONE or DIALOG_FOLLOW_ON
                         conversation_state = response["conversation_state"] #state information for the subsequent audio
 
-
                         #self.logger.info(speach)
                         self.tts.say(speach)
 
+                        try:
+                            # Custom device action to run Choregraphe scripts
+                            if response["deviceAction"]:
+                                device_command = json.dumps(response["deviceAction"]["inputs"][0]["payload"]["commands"][0]["execution"][0]["command"]).replace("\"", "")
+                                device_value =  json.dumps(response["deviceAction"]["inputs"][0]["payload"]["commands"][0]["execution"][0]["params"]["action"]).replace("\"", "")
+                                self.logger.info("comm " + device_command)
+                                self.logger.info("value " + device_value)
+                        except KeyError as e:
+                            device_command = ""
+                            pass
+
+
                         self.s.close()
 
-                        self.goReco()
+                        if device_command == "me.conema.commands.ZoraSwitch":
+                            self.startBehaviour(device_value)
+                            self.logger.info("finished GA")
+                            break
 
-                        if microphone_mode != DFO:
-                            #If GA dont't want an answer from the user
-                            self.soundPeak = False
+                        else:
+                            if microphone_mode != DFO:
+                                #If GA dont't want an answer from the user
+                                break;
 
-                            while not self.soundPeak:
-                                pass
+                            else:
+                                self.logger.info("Again");
 
-                        self.start_zora()
+                                self.soundPeak = False
+
+                                while not self.soundPeak:
+                                    pass
+
+                                self.goReco()
+                                self.start_zora()
                     else:
                         self.logger.info("Error/No answer")
-                        #break
 
-                        self.onError()
+                        self.onErrorGA()
 
                         self.goReco()
 
@@ -223,11 +231,44 @@ class MyClass(GeneratedClass):
 
         self.logger.info("finished GA")
         self.onStopped()
-        pass
 
     def onInput_onStop(self):
         self.onUnload() #it is recommended to reuse the clean-up as the box is stopped
-        self.onStopped() #activate the output of the box]]>
+        self.onStopped() #activate the output of the box
+
+    def connect_ga(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((self.ip, self.port))
+        s.setblocking(0)
+        return s
+
+    def start_recording(self):
+        p = Popen(command, stdout=PIPE, bufsize=1, close_fds=ON_POSIX)
+        q = Queue()
+        t = Thread(target=self.enqueue_output, args=(p.stdout, q))
+        t.daemon = True
+        t.start()
+
+        return q, t
+
+    def enqueue_output(self, out, queue):
+        t = threading.currentThread()
+
+        for line in iter(out.readline, b''):
+            if getattr(t, "stop_t", False):
+                # Stop thread
+                break
+            queue.put(line)
+        out.close()
+
+    def remove_emoji(self, text):
+        emoji_pattern = re.compile("["
+            u"\U0001F600-\U0001F64F"  # emoticons
+            u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+            u"\U0001F680-\U0001F6FF"  # transport & map symbols
+            u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+                               "]+", flags=re.UNICODE)
+        return emoji_pattern.sub(r'', text)]]>
 </content>
                             </script>
                             <Input name="onLoad" type="1" type_size="1" nature="0" inner="1" tooltip="Signal sent when diagram is loaded." id="1" />
@@ -239,7 +280,9 @@ class MyClass(GeneratedClass):
                             <Output name="onError" type="1" type_size="1" nature="2" inner="0" tooltip="" id="7" />
                             <Output name="onUnderstood" type="1" type_size="1" nature="2" inner="0" tooltip="" id="8" />
                             <Output name="goReco" type="1" type_size="1" nature="2" inner="0" tooltip="" id="9" />
-                            <Parameter name="url" inherits_from_parent="0" content_type="3" value="https://9f1d1359.ngrok.io/answer" default_value="" custom_choice="0" tooltip="" id="10" />
+                            <Output name="startBehaviour" type="3" type_size="1" nature="2" inner="0" tooltip="" id="10" />
+                            <Parameter name="IP" inherits_from_parent="0" content_type="3" value="127.0.0.1" default_value="127.0.0.1" custom_choice="0" tooltip="" id="11" />
+                            <Parameter name="Port" inherits_from_parent="0" content_type="1" value="4000" default_value="4000" min="0" max="65535" tooltip="" id="12" />
                         </Box>
                         <Box name="Face Tracker" id="4" localization="-1" tooltip="This box makes the robot track a face with different modes." x="205" y="323">
                             <bitmap>media/images/box/interaction/target_face.png</bitmap>

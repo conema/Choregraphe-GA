@@ -7,6 +7,9 @@
     <Dialogs />
     <Resources>
         <File name="google-assistant" src="google-assistant.png" />
+        <File name="" src=".gitignore" />
+        <File name="LICENSE" src="LICENSE" />
+        <File name="README" src="README.md" />
     </Resources>
     <Topics />
     <IgnoredPaths />
